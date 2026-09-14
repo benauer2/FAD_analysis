@@ -1,0 +1,63 @@
+# ==========================================
+# FILE PATHS
+# ==========================================
+file_paths:
+  base_dir: "C:/Users/cemshauerlocal/Documents/GitHub/velma-reactor-JH"
+  json_params_fid: "FAD_IntegrationParams_FID.json"
+  json_params_tcd: "FAD_IntegrationParams_TCD.json"
+
+temp_schedule:
+  - temperature: 80
+    duration_hours: 6
+  - temperature: 100
+    duration_hours: 6
+  - temperature: 125
+    duration_hours: 6
+  - temperature: 150
+    duration_hours: 6
+
+# Using '|' lets you write raw paragraphs with clean line-wrapping 
+notes: |
+  Taking background measurements of the reactor with no catalyst.
+
+analysis: "None."
+
+# ==========================================
+# TRIAL METADATA & GC CONFIG
+# ==========================================
+trial_info:
+  Date: "06.17.2026"
+  Trial: "Background run"
+  Device: "N/A"
+  Catalyst area (cm^2): 0.0
+  GC method: "FA_decomposition"
+  T reactor (deg C): 'Background cal'
+  T vaporizer (deg C): 20
+  T lines (deg C): 20
+  P reactor (psig): 0
+  Base Voltage (V): 0
+  Rxn: "Formic Acid Decomposition"
+  Mode: "Flow"
+  Reactor: "SiO2 coated stainless steel tube"
+  Catalyst pretreatment: "30 min H2 reduction at 50 sccm"
+  Bypass setup time (hr): 0
+  H2 flow (sccm): 0
+  N2 flow in setup (sccm): 5
+  Percent (%) FA in vapor stream: 4.0
+
+gc_method_info:
+  Dates tested: "01/6/2026"
+  Carrier gas: "N2"
+  Front inlet info: "150 deg C, 12 psig, Splitless, 15 sccm purge flow"
+  Column info: "Plot Q (30 m x 320 um, 20 um), Constant flow, 40 C for 4 min..."
+  Detectors: "TCD-PolyArc-FID"
+  TCD info: "250 deg C, 15 sccm ref flow, 1 sccm makeup flow, negative polarity"
+  PolyArc info: "293 deg C, 35 sccm H2, 2.5 sccm Air"
+  FID info: "350 deg C, 7 sccm H2 flow, 350 sccm Air flow, 20 sccm makeup flow"
+  Valve box T (deg C): 100
+  Sample loop size (ml): 1.0
+  6-port off mode: "GC connected to sample loop"
+  H2 calibration factor (TCD, umol/(uV s)): 9.46E-05
+  H2 calibration factor % error: 0.5
+  CO2 calibration factor (FID, umol/(pA s)): 3.95E-06
+  CO2 calibration factor % error: 0.2

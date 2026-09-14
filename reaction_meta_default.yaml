@@ -1,0 +1,121 @@
+# ==========================================
+# FILE PATHS
+# ==========================================
+file_paths:
+  base_dir: "C:/Users/cemshauerlocal/Documents/GitHub/REACTION-REPORT-GENERATOR/GC_handler"
+  json_params_fid: "FAD_IntegrationParams_FID.json"
+  json_params_tcd: "FAD_IntegrationParams_TCD.json"
+
+# ==========================================
+# PLOTTING & REACTION PARAMS
+# ==========================================
+shade_colors:
+  0: "white"
+  0.1: "#E1BEE7"
+  0.2: "#90CAF9"
+  0.3: "#4FC3F7"
+  0.4: "#26C6DA"
+  0.5: "#00ACC1"
+  1.0: "#00897B"
+  2.0: "#1A237E"
+  3.0: "#0D47A1"
+  -0.1: "#FFF59D"
+  -0.2: "#FFE082"
+  -0.3: "#FFB74D"
+  -0.4: "#FF8A65"
+  -0.5: "#F4511E"
+  -1.0: "#E53935"
+  -2.0: "#B71C1C"
+  -3.0: "#4A148C"
+  "OCP": "#E0E0E0"
+
+bias_schedule:
+  - voltage: 0
+    duration_hours: 16
+  - voltage: -0.1
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: -0.2
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: -0.3
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: -0.4
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: -0.5
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: 0.1
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: 0.2
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: 0.3
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: 0.4
+    duration_hours: 8
+  - voltage: 0
+    duration_hours: 8
+  - voltage: 0.5
+    duration_hours: 8
+
+# Using '|' lets you write raw paragraphs with clean line-wrapping 
+notes: |
+   IDT device with 50 mircon spacing of fingers. 20 nm SiO2 capping layer on the device.
+
+analysis: "None"
+
+# ==========================================
+# TRIAL METADATA & GC CONFIG
+# ==========================================
+trial_info:
+  Date: "08.12.2026"
+  Trial: "Rxn Trial 4"
+  Device: "#1 - IDT(50 um) IG(Silica + EDMIM TFSI, 1:4, 4um)/ SiO2(20 nm)/Au(50 nm) + Pt(50 nm)/Glass"
+  Catalyst area (cm^2): 1.0
+  GC method: "FA_decomposition"
+  T reactor (deg C): 125
+  T vaporizer (deg C): 20
+  T lines (deg C): 20
+  P reactor (psig): 0
+  Base Voltage (V): 0
+  Rxn: "Formic Acid Decomposition"
+  Mode: "Flow"
+  Reactor: "SiO2 coated stainless steel tube"
+  Catalyst pretreatment: "30 min H2 reduction at 50 sccm"
+  Bypass setup time (hr): 0
+  H2 flow (sccm): 0
+  N2 flow in setup (sccm): 15
+  Percent (%) FA in vapor stream: 1.37
+
+gc_method_info:
+  Dates tested: "08/31/2026"
+  Carrier gas: "N2"
+  Method name: "FA decomposition_v19"
+  Front inlet info: "100 deg C, 21.498 psig, Split (1:1), 4 sccm purge flow, 8 sccm total flow"
+  Column info: "Plot Q (30 m x 320 um, 20 um), Constant flow of 4 sccm"
+  Oven program: "40C for 7 min, Ramp 30C/min to 250C hold 6min, Ramp 100C/min to 30C hold 5.4min, Ramp 10C/min to 40C hold 1min."
+  Detectors: "TCD-PolyArc-FID"
+  TCD info: "250 deg C, 15 sccm ref flow, 1 sccm makeup flow, negative polarity"
+  PolyArc info: "293 deg C, 35 sccm H2, 2.5 sccm Air"
+  FID info: "350 deg C, 7 sccm H2 flow, 350 sccm Air flow, 20 sccm makeup flow"
+  Valve box T (deg C): 100
+  Sample loop size (ml): 1.0
+  6-port off mode: "GC connected to sample loop"
+  H2 calibration factor (TCD, umol/(uV s)): 0.0001665609
+  H2 calibration factor % error: 0.5
+  CO2 calibration factor_1 (FID, umol/(pA s)): 0.00000000001457
+  CO2 calibration factor_2 (FID, umol/(pA s)): 0.000007638
+  CO2 calibration factor % error: 0.2
