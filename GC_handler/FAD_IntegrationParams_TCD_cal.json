@@ -1,0 +1,29 @@
+{
+    "events": [
+        {
+            "detector": "TCD",
+            "chemicals": [
+                "H2"
+            ],
+            "_comment_chemicals": "The chemicals must appear in chronological order",
+            "cal_factor": [
+                1
+            ],
+            "_comment_cal_factor": "The calibration factor must be in (your desired units)/(peak area)",
+            "integration_algorithm": "simple peak",
+            "_comment_algorithm": "Options: simple peak, simple split, simple skim",
+            "time_stamps": [
+                1.4,
+                8.0
+            ],
+            "_comment_time_stamps": "single peaks need two time stamps, simple splits need three, simple skims need four",
+            "ignored_chemicals": [
+                "CO2"
+            ],
+            "_comment_ignored_chemicals": "This tells the integrator not to save the value for that chemical",
+            "meta_output_units": "uV*s",
+            "meta_user": "Ben Auer",
+            "meta_cal_date": "08/31/2026"
+        }
+    ]
+}
