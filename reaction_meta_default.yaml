@@ -2,7 +2,7 @@
 # FILE PATHS
 # ==========================================
 file_paths:
-  base_dir: "C:/Users/cemshauerlocal/Documents/GitHub/REACTION-REPORT-GENERATOR/GC_handler"
+  base_dir: "C:/Users/cemshauerlocal/Documents/GitHub/FAD_Analysis/GC_handler"
   json_params_fid: "FAD_IntegrationParams_FID.json"
   json_params_tcd: "FAD_IntegrationParams_TCD.json"
 
@@ -28,48 +28,6 @@ shade_colors:
   -2.0: "#B71C1C"
   -3.0: "#4A148C"
   "OCP": "#E0E0E0"
-
-bias_schedule:
-  - voltage: 0
-    duration_hours: 16
-  - voltage: -0.1
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: -0.2
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: -0.3
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: -0.4
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: -0.5
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: 0.1
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: 0.2
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: 0.3
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: 0.4
-    duration_hours: 8
-  - voltage: 0
-    duration_hours: 8
-  - voltage: 0.5
-    duration_hours: 8
 
 # Using '|' lets you write raw paragraphs with clean line-wrapping 
 notes: |
@@ -114,8 +72,8 @@ gc_method_info:
   Valve box T (deg C): 100
   Sample loop size (ml): 1.0
   6-port off mode: "GC connected to sample loop"
-  H2 calibration factor (TCD, umol/(uV s)): 0.0001665609
+  H2 calibration factor (TCD, umol/(uV s)): 1.3407350E-04
   H2 calibration factor % error: 0.5
-  CO2 calibration factor_1 (FID, umol/(pA s)): 0.00000000001457
-  CO2 calibration factor_2 (FID, umol/(pA s)): 0.000007638
+  CO2 calibration factor_1 (FID, umol/(pA s)): 0
+  CO2 calibration factor_2 (FID, umol/(pA s)): 5.4088556E-06
   CO2 calibration factor % error: 0.2

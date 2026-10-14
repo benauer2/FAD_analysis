@@ -15,25 +15,37 @@ R_GAS = 8.314  # J / (mol K)
 CALCULATES REACTION RATES BASED ON CONCENTRATIONS IN GC_df. GETS THEM ALIGNED WITH BIAS SCHEDULE FROM YAML FILE.
 #################################################################################################################
 '''
-def calc_rxn_rates(GC_df, RXN_SCHEDULE, tot_flow_f, v_box_t, p_reac_f, GC_METHOD_INFO):
+def calc_rxn_rates(GC_df, RXN_SCHEDULE=None, v_box_t=100.0, p_reac_f=0.0, GC_METHOD_INFO=None, tot_flow_f=0.0):
     #TEMPORARY SHORTCUT
     #C_1 = 0.00000000001457
     #C_2 = 0.000007638
     #H_1 = 0.0001665609
 
-    C_1 = GC_METHOD_INFO["CO2 calibration factor_1 (FID, umol/(pA s))"]
-    C_2 = GC_METHOD_INFO["CO2 calibration factor_2 (FID, umol/(pA s))"]
-    H_1 = GC_METHOD_INFO["H2 calibration factor (TCD, umol/(uV s))"]
-
+    GC_METHOD_INFO = GC_METHOD_INFO or {}
+    C_1 = float(GC_METHOD_INFO.get("CO2 calibration factor_1 (FID, umol/(pA s))", 0.0) or 0.0)
+    C_2 = float(GC_METHOD_INFO.get("CO2 calibration factor_2 (FID, umol/(pA s))", GC_METHOD_INFO.get("CO2 calibration factor (FID, umol/(pA s))", 7.638e-6)) or 7.638e-6)
+    H_1 = float(GC_METHOD_INFO.get("H2 calibration factor (TCD, umol/(uV s))", 0.0001665609) or 0.0001665609)
 
     if GC_df is None or GC_df.empty:
         return pd.DataFrame()
     
     rates_df = GC_df.copy()
 
-    # Time tracking setup
-    rates_df['Time (min)'] = [i * 30 for i in range(len(rates_df))]
-    rates_df['Time (hr)'] = rates_df['Time (min)'] / 60
+    # Time tracking setup - preserve existing time column if present
+    if "Time (hr)" in rates_df.columns:
+        rates_df["Time (min)"] = rates_df["Time (hr)"] * 60.0
+    elif "Time (min)" in rates_df.columns:
+        rates_df["Time (hr)"] = rates_df["Time (min)"] / 60.0
+    elif "Time" in rates_df.columns:
+        rates_df["Time (min)"] = pd.to_numeric(rates_df["Time"], errors="coerce").fillna(0.0)
+        rates_df["Time (hr)"] = rates_df["Time (min)"] / 60.0
+    else:
+        # Check if GC data indicates fast 5min sampling
+        is_fast_5min = any("5min" in str(c).lower() or "5min" in str(c).lower() for c in GC_df.columns)
+        dt_min = 5.0 if is_fast_5min else 30.0
+        rates_df['Time (min)'] = [i * dt_min for i in range(len(rates_df))]
+        rates_df['Time (hr)'] = rates_df['Time (min)'] / 60.0
+
     rates_df['Trial data point'] = [f"Flow {i}" for i in range(len(rates_df))]
 
     # Map RXN_SCHEDULE properties dynamically based on time_window
@@ -52,8 +64,29 @@ def calc_rxn_rates(GC_df, RXN_SCHEDULE, tot_flow_f, v_box_t, p_reac_f, GC_METHOD
         rates_df['N2_sccm'] = step_series.apply(
             lambda s: s["n2_flow"] if isinstance(s, dict) and "n2_flow" in s else 0.0
         )
+        rates_df['H2_sccm'] = step_series.apply(
+            lambda s: s["h2_flow"] if isinstance(s, dict) and "h2_flow" in s else 0.0
+        )
+        rates_df['FA_flow_ul_min'] = step_series.apply(
+            lambda s: s["fa_flow"] if isinstance(s, dict) and "fa_flow" in s else 0.0
+        )
+        rates_df['FA_vapor_sccm'] = step_series.apply(
+            lambda s: s["fa_vapor_sccm"] if isinstance(s, dict) and "fa_vapor_sccm" in s else 0.0
+        )
+        rates_df['FA_pct'] = step_series.apply(
+            lambda s: s["fa_pct"] if isinstance(s, dict) and "fa_pct" in s else 0.0
+        )
+        rates_df['Total_Flow_sccm'] = step_series.apply(
+            lambda s: s["tot_flow"] if (isinstance(s, dict) and "tot_flow" in s and s["tot_flow"] > 0) else tot_flow_f
+        )
         rates_df['Step_Start_hr'] = step_series.apply(
             lambda s: s["time_window"][0] if isinstance(s, dict) and "time_window" in s else 0.0
+        )
+        rates_df['Run'] = step_series.apply(
+            lambda s: s["run"] if isinstance(s, dict) and "run" in s else 1
+        )
+        rates_df['Condition_Step'] = step_series.apply(
+            lambda s: f"{s.get('rxr_t', 0)}°C - {s.get('n2_flow', 0)} sccm N2" if isinstance(s, dict) else "Default"
         )
         
         # Relative time inside current condition step
@@ -63,14 +96,21 @@ def calc_rxn_rates(GC_df, RXN_SCHEDULE, tot_flow_f, v_box_t, p_reac_f, GC_METHOD
         rates_df['Bias (V)'] = 0.0
         rates_df['Temp_C'] = 0.0
         rates_df['N2_sccm'] = 0.0
+        rates_df['H2_sccm'] = 0.0
+        rates_df['FA_flow_ul_min'] = 0.0
+        rates_df['FA_vapor_sccm'] = 0.0
+        rates_df['FA_pct'] = 0.0
+        rates_df['Total_Flow_sccm'] = tot_flow_f
+        rates_df['Run'] = 1
+        rates_df['Condition_Step'] = "Default"
         rates_df['Step_Rel_Time_hr'] = rates_df['Time (hr)']
 
-    # Calculate normalization parameters
+    # Calculate normalization parameters dynamically per row/step
     denom_p = 14.696 + float(p_reac_f)
     if denom_p == 0:
         denom_p = 14.696
 
-    norm_vol_factor = (tot_flow_f * (273.1 + float(v_box_t)) / 300 * 14.696 / denom_p) * 1000
+    norm_vol_factor = (rates_df['Total_Flow_sccm'] * (273.15 + float(v_box_t)) / 300 * 14.696 / denom_p) * 1000
 
     for species in ['CO2', 'FA', 'H2', 'CO']:
         if species in rates_df.columns:
@@ -101,6 +141,11 @@ def assign_schedule_parameters(df_gc, RXN_SCHEDULE):
     
     if not RXN_SCHEDULE:
         df["N2_flow_sccm"] = 0.0
+        df["H2_flow_sccm"] = 0.0
+        df["FA_flow_ul_min"] = 0.0
+        df["FA_vapor_sccm"] = 0.0
+        df["FA_pct"] = 0.0
+        df["Total_Flow_sccm"] = 0.0
         df["Condition_Step"] = "Default"
         df["Step_Rel_Time_hr"] = df["Time (hr)"]
         df["Avg_Window"] = [[0,1]] * len(df)
@@ -110,20 +155,25 @@ def assign_schedule_parameters(df_gc, RXN_SCHEDULE):
     schedule_intervals = []
     
     for phase in RXN_SCHEDULE:
-        duration = float(phase.get("duration_hours", 0.0))
+        duration = float(phase.get("dur_hrs", phase.get("duration_hours", 0.0)))
         start_time = current_time
         end_time = current_time + duration
         schedule_intervals.append({
             "start": start_time,
             "end": end_time,
-            "temp": phase.get("temperature", 0.0),
-            "n2_flow": float(phase.get("mfc_rate", 0.0)),
+            "temp": phase.get("rxr_t", phase.get("temperature", 0.0)),
+            "n2_flow": float(phase.get("n2_flow", phase.get("mfc_rate", 0.0))),
+            "h2_flow": float(phase.get("h2_flow", 0.0)),
+            "fa_flow": float(phase.get("fa_flow", 0.0)),
+            "fa_vapor_sccm": float(phase.get("fa_vapor_sccm", 0.0)),
+            "tot_flow": float(phase.get("tot_flow", phase.get("n2_flow", 0.0))),
+            "fa_pct": float(phase.get("fa_pct", 0.0)),
             "avg_window": phase.get("avg_window", [0, duration]),
-            "label": f"{phase.get('temperature', 0.0)}°C - {phase.get('mfc_rate', 0.0)} sccm N2"
+            "label": f"{phase.get('rxr_t', 0.0)}°C - {phase.get('n2_flow', 0.0)} sccm N2"
         })
         current_time = end_time
 
-    n2_flows, condition_steps, rel_times, avg_windows = [], [], [], []
+    n2_flows, h2_flows, fa_flows, fa_vapors, tot_flows, fa_pcts, condition_steps, rel_times, avg_windows = [], [], [], [], [], [], [], [], []
     
     for _, row in df.iterrows():
         t = row["Time (hr)"]
@@ -131,6 +181,11 @@ def assign_schedule_parameters(df_gc, RXN_SCHEDULE):
         for interval in schedule_intervals:
             if interval["start"] <= t <= interval["end"]:
                 n2_flows.append(interval["n2_flow"])
+                h2_flows.append(interval["h2_flow"])
+                fa_flows.append(interval["fa_flow"])
+                fa_vapors.append(interval["fa_vapor_sccm"])
+                tot_flows.append(interval["tot_flow"])
+                fa_pcts.append(interval["fa_pct"])
                 condition_steps.append(interval["label"])
                 rel_times.append(t - interval["start"])
                 avg_windows.append(interval["avg_window"])
@@ -139,11 +194,21 @@ def assign_schedule_parameters(df_gc, RXN_SCHEDULE):
         if not matched:
             target = schedule_intervals[0] if t < schedule_intervals[0]["start"] else schedule_intervals[-1]
             n2_flows.append(target["n2_flow"])
+            h2_flows.append(target["h2_flow"])
+            fa_flows.append(target["fa_flow"])
+            fa_vapors.append(target["fa_vapor_sccm"])
+            tot_flows.append(target["tot_flow"])
+            fa_pcts.append(target["fa_pct"])
             condition_steps.append(target["label"])
             rel_times.append(t - target["start"])
             avg_windows.append(target["avg_window"])
 
     df["N2_flow_sccm"] = n2_flows
+    df["H2_flow_sccm"] = h2_flows
+    df["FA_flow_ul_min"] = fa_flows
+    df["FA_vapor_sccm"] = fa_vapors
+    df["FA_pct"] = fa_pcts
+    df["Total_Flow_sccm"] = tot_flows
     df["Condition_Step"] = condition_steps
     df["Step_Rel_Time_hr"] = rel_times
     df["Avg_Window"] = avg_windows
@@ -162,6 +227,7 @@ def compute_schedule_summary(rates_df, RXN_SCHEDULE):
             
         temp_c = phase["rxr_t"]
         mfc_rate = phase["n2_flow"]
+        tot_flow_val = phase.get("tot_flow", mfc_rate)
         if pd.isna(temp_c):
             continue
 
@@ -198,7 +264,9 @@ def compute_schedule_summary(rates_df, RXN_SCHEDULE):
             "Run": phase["run"],
             "Rxr_T_C": temp_c,
             "N2_flow_sccm": mfc_rate,
-            "FA_flow_ul.min": phase["fa_flow"],
+            "Total_Flow_sccm": tot_flow_val,
+            "FA_flow_ul.min": phase.get("fa_flow", 0.0),
+            "FA_pct": phase.get("fa_pct", 0.0),
             "WE_Voltage": phase["we_volt"],
             "Avg_Window": f"{avg_win_start:.1f}-{avg_win_end:.1f}h",
             "Run_Time": f"[{start_time_hr:.1f}, {end_time_hr:.1f}]",
@@ -245,20 +313,23 @@ def calc_rxn_rates_dynamic(GC_df, RXN_SCHEDULE, TRIAL_INFO, GC_METHOD_INFO):
 
     rates_df = assign_schedule_parameters(GC_df, RXN_SCHEDULE)
     
-    fa_pct = float(TRIAL_INFO.get("Percent (%) FA in vapor stream", 4.0))
     h2_flow = float(TRIAL_INFO.get("H2 flow (sccm)", 0.0))
     p_reac_f = float(TRIAL_INFO.get("P reactor (psig)", 0.0))
     v_box_t = float(GC_METHOD_INFO.get("Valve box T (deg C)", 100.0))
-
-    fa_frac_denom = 1.0 - (fa_pct / 100.0)
-    if fa_frac_denom <= 0:
-        fa_frac_denom = 0.01
 
     denom_p = p_reac_f + 14.696
     if denom_p == 0:
         denom_p = 14.696
 
-    rates_df["Tot_Flow_sccm"] = (rates_df["N2_flow_sccm"] + h2_flow) / fa_frac_denom
+    if "Total_Flow_sccm" in rates_df.columns and (rates_df["Total_Flow_sccm"] > 0).any():
+        rates_df["Tot_Flow_sccm"] = rates_df["Total_Flow_sccm"]
+    else:
+        fa_pct = float(TRIAL_INFO.get("Percent (%) FA in vapor stream", 4.0))
+        fa_frac_denom = 1.0 - (fa_pct / 100.0)
+        if fa_frac_denom <= 0:
+            fa_frac_denom = 0.01
+        rates_df["Tot_Flow_sccm"] = (rates_df["N2_flow_sccm"] + h2_flow) / fa_frac_denom
+
     rates_df["norm_vol_factor"] = (
         rates_df["Tot_Flow_sccm"] * (273.15 + v_box_t) / 300.0 * 14.696 / denom_p
     ) * 1000.0
@@ -382,30 +453,84 @@ def compute_voltage_window_summary(rates_df, bias_schedule, instrumental_rel_err
     return pd.DataFrame(summary_rows)
 
 
-def GC_calibration(GC_df, flow_sched, p_reac_f, mfc_df):
-    if GC_df is None or GC_df.empty:
-        return pd.DataFrame()
-    
-    areas_df = GC_df.copy()
+def perform_arrhenius_analysis(summary_df):
+    """
+    Performs linear regression of ln(Rate) vs 1/T for Arrhenius kinetic parameters.
+    Returns dictionary with fit details, activation energies (Ea in kJ/mol), and pre-exponential factors.
+    """
+    if summary_df is None or summary_df.empty:
+        return {}
 
-    areas_df['Time (min)'] = [i * 30 for i in range(len(areas_df))]
-    areas_df['Time (hr)'] = areas_df['Time (min)'] / 60
+    df = summary_df.copy()
+    temp_col = "Rxr_T_C" if "Rxr_T_C" in df.columns else ("Temp_C" if "Temp_C" in df.columns else "Temperature_C")
+    if temp_col not in df.columns:
+        return {}
 
-    for species in ['CO2', 'FA', 'H2']:
-        if species in areas_df.columns:
-            areas_df[species] = pd.to_numeric(areas_df[species], errors='coerce').fillna(0.0)
+    df["Temp_C_num"] = pd.to_numeric(df[temp_col], errors="coerce")
+    df["Temp_K"] = df["Temp_C_num"] + 273.15
+
+    results = {}
+
+    for species in ["CO2", "H2", "CO"]:
+        avg_col = f"{species}_avg" if f"{species}_avg" in df.columns else f"{species} (nmol/min)"
+        std_col = f"{species}_std" if f"{species}_std" in df.columns else None
+
+        if avg_col not in df.columns:
+            continue
+
+        s_avg = pd.to_numeric(df[avg_col], errors="coerce")
+        valid_mask = (s_avg > 0) & (df["Temp_K"] > 0) & np.isfinite(s_avg) & np.isfinite(df["Temp_K"])
+        valid_df = df[valid_mask].copy()
+
+        if len(valid_df) < 2:
+            continue
+
+        inv_T = 1.0 / valid_df["Temp_K"].values
+        rates = pd.to_numeric(valid_df[avg_col], errors="coerce").values
+        ln_rate = np.log(rates)
+        rate_std = pd.to_numeric(valid_df[std_col], errors="coerce").values if (std_col and std_col in valid_df.columns) else None
+
+        res = linregress(inv_T, ln_rate)
+        slope, intercept, r_val, p_val, slope_err = (
+            res.slope, res.intercept, res.rvalue, res.pvalue, res.stderr
+        )
+        intercept_err = getattr(res, 'intercept_stderr', np.nan)
+
+        Ea_kJ = -slope * R_GAS / 1000.0
+        A_factor = np.exp(intercept)
+        r2 = r_val ** 2
+
+        Ea_err_kJ = slope_err * R_GAS / 1000.0 if slope_err is not None else np.nan
+        A_err = A_factor * intercept_err if intercept_err is not None and np.isfinite(intercept_err) else np.nan
+
+        n_pts = len(inv_T)
+        df_deg = n_pts - 2
+        if df_deg > 0 and np.isfinite(Ea_err_kJ):
+            t_crit = t.ppf(0.975, df=df_deg)
+            Ea_ci95_kJ = Ea_err_kJ * t_crit
+            A_ci95 = A_err * t_crit if np.isfinite(A_err) else np.nan
         else:
-           areas_df[species] == 0
+            Ea_ci95_kJ = np.nan
+            A_ci95 = np.nan
 
-    norm_vol_factor = 1
-        
-    areas_df['CO (pA s)'] = areas_df['CO'] * norm_vol_factor
-    areas_df['H2 (pA s)'] = areas_df['H2'] * norm_vol_factor
+        key_name = f"{species}_avg"
+        results[key_name] = {
+            "species": species,
+            "inv_T": inv_T,
+            "ln_rate": ln_rate,
+            "rate_std": rate_std,
+            "slope": slope,
+            "intercept": intercept,
+            "r_val": r_val,
+            "R2": r2,
+            "p_val": p_val,
+            "Ea_kJ": Ea_kJ,
+            "Ea_err_kJ": Ea_err_kJ,
+            "Ea_ci95_kJ": Ea_ci95_kJ,
+            "A": A_factor,
+            "A_err": A_err,
+            "A_ci95": A_ci95,
+            "N_points": n_pts
+        }
 
-    X_CO = areas_df['CO (pA s)']
-    model = sm.OLS(concs, X_CO).fit()
-
-    print("Coefficients:", model.params)
-    print("R-squared:", model.rsquared)
-
-    print(model.summary())
+    return results

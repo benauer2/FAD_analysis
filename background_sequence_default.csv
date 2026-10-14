@@ -1,0 +1,5 @@
+Step_Index,Reactor_T_C,N2_Flow_sccm,FA_flow_ul_min,Target_Voltage_V,Avg_Window,Duration_hrs
+1,80,15,0.3269,0.0,"2, 6",6
+2,100,15,0.3269,0.0,"2, 6",6
+3,125,15,0.3269,0.0,"2, 6",6
+4,150,15,0.3269,0.0,"2, 6",6

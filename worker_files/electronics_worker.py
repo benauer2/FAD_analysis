@@ -1,6 +1,7 @@
 from pathlib import Path
 import shutil
 import warnings
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -8,59 +9,257 @@ from scipy.integrate import simpson
 from scipy import stats
 from impedance.models.circuits import CustomCircuit
 
-from config import get_step_at_time
+from config import get_step_at_time, get_voltage_at_time
 
 def assign_voltage_windows(df, rxn_schedule):
-    df['Voltage_Window'] = df['Time (hr)'].apply(
-        lambda t: get_step_at_time(t, rxn_schedule).get('we_volt', None)
+    """
+    Annotates the electronics DataFrame with schedule properties based on hard step boundaries:
+    Bias (V), Temp_C, N2_sccm, FA_flow_ul_min, Step_Index, Step_Start_hr, Step_End_hr, Step_Rel_Time_hr, Avg_Window.
+    """
+    if df is None or df.empty:
+        return df
+
+    if 'Time (hr)' not in df.columns and 'Elapsed Time (s)' in df.columns:
+        df['Time (hr)'] = pd.to_numeric(df['Elapsed Time (s)'], errors='coerce') / 3600.0
+    
+    if not rxn_schedule:
+        df['Voltage_Window'] = 0.0
+        df['Bias (V)'] = 0.0
+        df['Temp_C'] = 0.0
+        df['N2_sccm'] = 0.0
+        df['FA_flow_ul_min'] = 0.0
+        df['Step_Index'] = 1
+        df['Step_Start_hr'] = 0.0
+        df['Step_End_hr'] = df['Time (hr)'].max() if ('Time (hr)' in df.columns and not df['Time (hr)'].empty and np.isfinite(df['Time (hr)'].max())) else 0.0
+        df['Step_Rel_Time_hr'] = df['Time (hr)'] if 'Time (hr)' in df.columns else 0.0
+        return df
+
+    # If Step_Index column is already explicitly present (from hardware orchestrator)
+    if "Step_Index" in df.columns and df["Step_Index"].dropna().nunique() > 0:
+        def match_by_step_or_time(row):
+            s_idx = row.get("Step_Index")
+            try:
+                s_int = int(s_idx)
+                if 1 <= s_int <= len(rxn_schedule):
+                    return rxn_schedule[s_int - 1]
+            except (ValueError, TypeError):
+                pass
+            t_val = row.get("Time (hr)", 0.0)
+            return get_step_at_time(t_val, RXN_SCHEDULE=rxn_schedule)
+
+        step_series = df.apply(match_by_step_or_time, axis=1)
+    else:
+        step_series = df['Time (hr)'].apply(
+            lambda t: get_step_at_time(t, RXN_SCHEDULE=rxn_schedule)
+        )
+
+    df['Voltage_Window'] = step_series.apply(
+        lambda s: s["we_volt"] if isinstance(s, dict) and "we_volt" in s else 0.0
     )
+    df['Bias (V)'] = df['Voltage_Window']
+    df['Temp_C'] = step_series.apply(
+        lambda s: s["rxr_t"] if isinstance(s, dict) and "rxr_t" in s else 0.0
+    )
+    df['N2_sccm'] = step_series.apply(
+        lambda s: s["n2_flow"] if isinstance(s, dict) and "n2_flow" in s else 0.0
+    )
+    df['FA_flow_ul_min'] = step_series.apply(
+        lambda s: s["fa_flow"] if isinstance(s, dict) and "fa_flow" in s else 0.0
+    )
+    df['Step_Index'] = step_series.apply(
+        lambda s: s["run"] if isinstance(s, dict) and "run" in s else 1
+    )
+    df['Step_Start_hr'] = step_series.apply(
+        lambda s: s["time_window"][0] if isinstance(s, dict) and "time_window" in s else 0.0
+    )
+    df['Step_End_hr'] = step_series.apply(
+        lambda s: s["time_window"][1] if isinstance(s, dict) and "time_window" in s else 0.0
+    )
+    df['Step_Rel_Time_hr'] = df['Time (hr)'] - df['Step_Start_hr']
+    df['Avg_Window'] = step_series.apply(
+        lambda s: s["avg_window"] if isinstance(s, dict) and "avg_window" in s else [0.0, 0.0]
+    )
+
     return df
 
 
 #------------------------------------------------------------------
 # CV ANALYSIS FUNCTIONS
 #------------------------------------------------------------------
+def detect_sweep_rate(df_sweep, default_map=None, sweep_idx=0):
+    """
+    Detects CV sweep rate from dataframe notes/columns or directly from empirical dV/dt slope.
+    """
+    # 1. Check explicit columns
+    rate_col_candidates = [
+        "Sweep_Rate_V_s", "Sweep_rate_v_s", "Scan Rate (V/s)", "Sweep Rate (V/s)", "Scan Rate", "Sweep Rate",
+        "Scan_Rate", "Sweep_Rate", "rate", "Rate", "scan_rate", "sweep_rate"
+    ]
+    for col in rate_col_candidates:
+        if col in df_sweep.columns:
+            val = pd.to_numeric(df_sweep[col], errors="coerce").dropna()
+            if not val.empty and val.iloc[0] > 0:
+                return float(val.iloc[0])
+
+    # 2. Check notes / comment columns for text patterns
+    text_col_candidates = ["Notes", "Note", "Comment", "Comments", "Step description", "Step name", "Step_Name", "Tag", "Label"]
+    for col in text_col_candidates:
+        if col in df_sweep.columns:
+            text_val = str(df_sweep[col].iloc[0])
+            m_mv = re.search(r'([0-9]*\.?[0-9]+)\s*m[vV]/s', text_val)
+            if m_mv:
+                return float(m_mv.group(1)) / 1000.0
+            m_v = re.search(r'([0-9]*\.?[0-9]+)\s*[vV]/s', text_val)
+            if m_v:
+                return float(m_v.group(1))
+
+    # 3. Calculate empirical dV/dt from potential and elapsed time data
+    v_col = None
+    for candidate in ["Working Electrode (V)", "Working_Electrode_V", "Potential (V)", "Voltage (V)", "E (V)"]:
+        if candidate in df_sweep.columns:
+            v_col = candidate
+            break
+    if v_col is None and len(df_sweep.columns) > 2:
+        v_col = df_sweep.columns[2]
+
+    t_col = None
+    for candidate in ["Elapsed Time (s)", "Elapsed_Time_s", "Time (s)", "t (s)"]:
+        if candidate in df_sweep.columns:
+            t_col = candidate
+            break
+    if t_col is None and len(df_sweep.columns) > 0:
+        t_col = df_sweep.columns[0]
+
+    if v_col and t_col:
+        v_vals = pd.to_numeric(df_sweep[v_col], errors="coerce").values
+        t_vals = pd.to_numeric(df_sweep[t_col], errors="coerce").values
+        valid_mask = np.isfinite(v_vals) & np.isfinite(t_vals)
+        v_vals = v_vals[valid_mask]
+        t_vals = t_vals[valid_mask]
+
+        if len(v_vals) > 5:
+            dt = np.diff(t_vals)
+            dv = np.diff(v_vals)
+            valid_steps = dt > 0.0005
+            if np.any(valid_steps):
+                inst_rates = np.abs(dv[valid_steps] / dt[valid_steps])
+                filtered_rates = inst_rates[inst_rates > 0.001]
+                if len(filtered_rates) > 0:
+                    emp_rate = float(np.median(filtered_rates))
+                    
+                    # Snap to closest known standard rate if within 18% tolerance
+                    std_rates = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 5.0]
+                    closest_std = min(std_rates, key=lambda x: abs(x - emp_rate))
+                    if abs(closest_std - emp_rate) / max(closest_std, 1e-6) < 0.18:
+                        return closest_std
+                    return round(emp_rate, 3)
+
+    # 4. Fallback to default mapping if provided
+    if default_map:
+        pos = sweep_idx % len(default_map)
+        return default_map.get(pos, 1.0)
+
+    return 1.0
+
+
 def get_cv(df_raw, sweep_rate_map=None):
-    'GETS CV DATA FROM REACTION ELECTRONICS DF. DIVIDES INTO INDIVIDUAL CHUNKS AND ASSIGNS SWEEP RATES TO THE SCANS.'
+    """
+    Extracts CV data from reaction electronics DataFrame, partitions into individual sweeps,
+    and assigns sweep rates. Fully supports both legacy and new Squidstat output schemas.
+    """
     if df_raw is None or df_raw.empty:
         return df_raw, {}
     
     if sweep_rate_map is None:
-        sweep_rate_map = {0: 0.5, 1: 1.0, 2: 1.5}
+        sweep_rate_map = {0: 0.5, 1: 1.0, 2: 1.5, 3: 0.02}
 
     df_cv = df_raw.copy()
     df_cv.columns = df_cv.columns.str.strip()
 
-    if "Step name" not in df_cv.columns or "Cyclic Voltammetry" not in df_cv['Step name'].values:
-        return None, {}
+    # Normalize column names for both schemas
+    if "Step name" not in df_cv.columns:
+        if "Step_Name" in df_cv.columns:
+            df_cv["Step name"] = df_cv["Step_Name"]
+        elif "Element_Type" in df_cv.columns:
+            df_cv["Step name"] = df_cv["Element_Type"]
+        else:
+            df_cv["Step name"] = ""
+
+    elem_col = "Element_Type" if "Element_Type" in df_cv.columns else "Step name"
     
-    df_cv['Time (hr)'] = df_cv['Elapsed Time (s)'] / 3600.0
-    df_cv['Current (uA)'] = df_cv['Current (A)'] * 1e6
-    df_cv['Step name'] = df_cv['Step name'].astype(str).str.strip()
+    is_cv = (
+        df_cv[elem_col].astype(str).str.contains("Cyclic|CV", case=False, na=False) |
+        df_cv["Step name"].astype(str).str.contains("Cyclic|CV", case=False, na=False)
+    )
+    
+    if not is_cv.any():
+        return df_cv, {}
+    
+    t_col = "Elapsed Time (s)" if "Elapsed Time (s)" in df_cv.columns else ("Elapsed_Time_s" if "Elapsed_Time_s" in df_cv.columns else df_cv.columns[0])
+    df_cv['Time (hr)'] = pd.to_numeric(df_cv[t_col], errors='coerce') / 3600.0
+    
+    i_col = "Current (A)" if "Current (A)" in df_cv.columns else ("Current" if "Current" in df_cv.columns else df_cv.columns[3])
+    df_cv['Current (uA)'] = pd.to_numeric(df_cv[i_col], errors='coerce') * 1e6
 
-    relevant_steps = df_cv[df_cv["Step name"].isin(["Cyclic Voltammetry", "Constant Potential"])].copy()
-    is_cp = relevant_steps["Step name"] == "Constant Potential"
-    relevant_steps["major_block_id"] = (is_cp != is_cp.shift()).cumsum()
-
-    cv_only_df = relevant_steps[relevant_steps["Step name"] == "Cyclic Voltammetry"].copy()
+    # Extract CV rows
+    cv_only_df = df_cv[is_cv].copy()
     if cv_only_df.empty:
         return df_cv, {}
+
+    # Determine major block IDs (e.g. per reaction step or contiguous runs of CV)
+    if "Step_Index" in cv_only_df.columns and cv_only_df["Step_Index"].dropna().nunique() > 0:
+        cv_only_df["block_id"] = cv_only_df["Step_Index"]
+    else:
+        # Group contiguous runs of CV
+        is_cv_all = is_cv.values
+        block_ids = np.zeros(len(df_cv), dtype=int)
+        b_count = 0
+        in_cv = False
+        for idx_row, flag in enumerate(is_cv_all):
+            if flag and not in_cv:
+                b_count += 1
+                in_cv = True
+            elif not flag:
+                in_cv = False
+            block_ids[idx_row] = b_count
+        df_cv["_cv_block"] = block_ids
+        cv_only_df["block_id"] = df_cv.loc[cv_only_df.index, "_cv_block"]
 
     cv_segments = {}
     segment_count = 1
 
-    for _, chunk_group in cv_only_df.groupby("major_block_id"):
+    for block_val, chunk_group in cv_only_df.groupby("block_id"):
         chunk_group = chunk_group.copy()
-        chunk_group["dt"] = chunk_group["Elapsed Time (s)"].diff()
-        chunk_group["is_new_sweep"] = chunk_group["dt"] > 3.0
-        chunk_group["sweep_in_chunk"] = (chunk_group["is_new_sweep"].fillna(False).cumsum())
+        t_vals = pd.to_numeric(chunk_group[t_col], errors='coerce').fillna(0).values
+        
+        # Detect new sweep start
+        is_new_sweep = np.zeros(len(chunk_group), dtype=bool)
+        is_new_sweep[0] = True  # first row of block is start of sweep 0
+
+        # Step name or sweep rate changes
+        if "Step_Name" in chunk_group.columns:
+            step_changed = (chunk_group["Step_Name"] != chunk_group["Step_Name"].shift(1)).values
+            is_new_sweep = is_new_sweep | step_changed
+
+        if "Sweep_Rate_V_s" in chunk_group.columns:
+            rate_changed = (chunk_group["Sweep_Rate_V_s"] != chunk_group["Sweep_Rate_V_s"].shift(1)).values
+            is_new_sweep = is_new_sweep | rate_changed
+
+        # Timestamp reset (e.g. dt < -0.5s or dt > 3.0s)
+        for k in range(1, len(t_vals)):
+            dt = t_vals[k] - t_vals[k-1]
+            if dt < -0.5 or dt > 3.0:
+                is_new_sweep[k] = True
+
+        chunk_group["sweep_in_chunk"] = is_new_sweep.cumsum()
 
         for sweep_idx, (_, sweep_group) in enumerate(chunk_group.groupby("sweep_in_chunk")):
             clean_sweep = sweep_group.drop(
-                columns=["dt","is_new_sweep","sweep_in_chunk","major_block_id",], errors='ignore').copy()
+                columns=["sweep_in_chunk", "block_id", "_cv_block"], errors='ignore').copy()
 
-            position = sweep_idx % len(sweep_rate_map)
-            clean_sweep["sweep_rate"] = sweep_rate_map.get(position, 1.0)
+            clean_sweep["block_id"] = block_val
+            clean_sweep["sweep_idx"] = sweep_idx
+            clean_sweep["sweep_rate"] = detect_sweep_rate(clean_sweep, default_map=sweep_rate_map, sweep_idx=sweep_idx)
             cv_segments[segment_count] = clean_sweep
             segment_count += 1
 
@@ -119,8 +318,9 @@ def calculate_loop_area(voltage, current):
         return 0.0
     return abs(simpson(y=current, x=voltage))
 
-def calc_cap_from_cv(cv_segments, bias_schedule=None, delta_V=2.0):
+def calc_cap_from_cv(cv_segments, rxn_schedule=None, delta_V=2.0, bias_schedule=None):
     'CALCULATES ENCLOSED AREA OF CV USING THE SHOELACE FORMULA (SIMPSON METHOD)'
+    schedule = rxn_schedule or bias_schedule
     if not cv_segments:
         return pd.DataFrame(columns=["CV Run", "Sweep Rate (V/s)", "Preceding Condition", "Capacitance (uF)", "Time (hr)"])
 
@@ -131,7 +331,11 @@ def calc_cap_from_cv(cv_segments, bias_schedule=None, delta_V=2.0):
         enclosed_area = calculate_loop_area(voltage, current)
         scan_rate = cv_df['sweep_rate'].iloc[0] if 'sweep_rate' in cv_df.columns else 1.0
         
-        capacitance = abs(enclosed_area / (2 * scan_rate * delta_V)) if (scan_rate > 0 and delta_V > 0) else 0.0
+        span_v = voltage.max() - voltage.min() if len(voltage) > 1 else delta_V
+        if span_v <= 0:
+            span_v = delta_V
+            
+        capacitance = abs(enclosed_area / (2 * scan_rate * span_v)) if (scan_rate > 0 and span_v > 0) else 0.0
         cv_df['capacitance (uF)'] = capacitance * 1e6
 
     summary_rows = []
@@ -145,19 +349,25 @@ def calc_cap_from_cv(cv_segments, bias_schedule=None, delta_V=2.0):
         cap = cv_df['capacitance (uF)'].iloc[0]
         raw_t = cv_df['Time (hr)'].iloc[0]
         
-        if rate == 1.0:
-            if cv_id == first_cv_id:
-                prior_condition = "Initial Setup"
+        if cv_id == first_cv_id or raw_t < 0.1:
+            prior_condition = "Initial Setup"
+        elif schedule:
+            step = get_step_at_time(max(raw_t - 0.5, 0), schedule)
+            if isinstance(step, dict) and "we_volt" in step:
+                volt_val = step["we_volt"]
+                prior_condition = f"{volt_val} V" if isinstance(volt_val, (int, float)) else str(volt_val)
             else:
-                prior_condition = get_bias_at_time(max(raw_t - 0.5, 0), bias_schedule)
+                prior_condition = "N/A"
+        else:
+            prior_condition = "Initial Setup"
 
-            summary_rows.append({
-                "CV Run": cv_id,
-                "Sweep Rate (V/s)": rate,
-                "Preceding Condition": prior_condition,
-                "Capacitance (uF)": cap,
-                "Time (hr)": round(raw_t, 1)
-            })
+        summary_rows.append({
+            "CV Run": cv_id,
+            "Sweep Rate (V/s)": rate,
+            "Preceding Condition": prior_condition,
+            "Capacitance (uF)": cap,
+            "Time (hr)": round(raw_t, 1)
+        })
 
     columns = ["CV Run", "Sweep Rate (V/s)", "Preceding Condition", "Capacitance (uF)", "Time (hr)"]
     return pd.DataFrame(summary_rows, columns=columns)
@@ -167,7 +377,7 @@ def calc_cap_from_cv_grouped(dfs_dict):
     summary_rows = []
 
     for folder_name, df in dfs_dict.items():
-        if "cv" not in folder_name.lower() or "10 " in folder_name:
+        if "cv" not in folder_name.lower():
             continue
 
         step_col = "Step number" if "Step number" in df.columns else None
@@ -177,12 +387,14 @@ def calc_cap_from_cv_grouped(dfs_dict):
             df = df.assign(**{"Step number": 1})
 
         for step in unique_steps:
-            step_data = df[df["Step number"] == step].sort_values("Elapsed Time (s)")
+            step_data = df[df["Step number"] == step].sort_values("Elapsed Time (s)") if "Elapsed Time (s)" in df.columns else df[df["Step number"] == step]
             if len(step_data) < 3:
                 continue
 
-            v_col = ("Working Electrode (V)" if "Working Electrode (V)" in step_data.columns else step_data.columns[4])
-            c_col = ("Current (A)" if "Current (A)" in step_data.columns else step_data.columns[3])
+            v_col = ("Working Electrode (V)" if "Working Electrode (V)" in step_data.columns 
+                     else ("Potential (V)" if "Potential (V)" in step_data.columns else step_data.columns[4 if len(step_data.columns) > 4 else 2]))
+            c_col = ("Current (A)" if "Current (A)" in step_data.columns 
+                     else ("Current (uA)" if "Current (uA)" in step_data.columns else step_data.columns[3]))
 
             raw_voltage = pd.to_numeric(step_data[v_col], errors="coerce")
             raw_current = pd.to_numeric(step_data[c_col], errors="coerce")
@@ -193,8 +405,11 @@ def calc_cap_from_cv_grouped(dfs_dict):
             if len(voltage) < 3:
                 continue
 
+            if "uA" in str(c_col) or "\u03bcA" in str(c_col):
+                current = current * 1e-6
+
             enclosed_area = calculate_loop_area(voltage, current)
-            scan_rate = 1.0 if "1 V-s" in folder_name else step * 0.1
+            scan_rate = 1.0 if ("1 V-s" in folder_name or len(unique_steps) == 1) else step * 0.1
             delta_V = voltage.max() - voltage.min()
 
             capacitance_F = abs(enclosed_area / (2 * scan_rate * delta_V)) if (scan_rate > 0 and delta_V > 0) else 0.0
@@ -213,11 +428,12 @@ def calc_cap_from_cv_grouped(dfs_dict):
 
     return pd.DataFrame(summary_rows)
 
-def calc_cap_from_sweep_rate_slope(cv_segments, eval_potential=0.0, bias_schedule=None, sweeps_per_chunk=3):
+def calc_cap_from_sweep_rate_slope(cv_segments, eval_potential=0.0, rxn_schedule=None, sweeps_per_chunk=3, bias_schedule=None):
     """
     Groups CV sweeps into discrete chunks, extracts capacitance via linear regression (i = C * v),
     and subtracts non-zero y-intercept leakage current (i_leak).
     """
+    schedule = rxn_schedule or bias_schedule
     if not cv_segments:
         return pd.DataFrame(), []
 
@@ -270,9 +486,17 @@ def calc_cap_from_sweep_rate_slope(cv_segments, eval_potential=0.0, bias_schedul
         currents_corrected_uA = currents_avg_uA - intercept
 
         avg_t = np.mean(time_hrs) if time_hrs else 0.0
-        prior_condition = "Initial Setup"
-        if bias_schedule and avg_t > 0.1:
-            prior_condition = get_bias_at_time(avg_t, bias_schedule)
+        if avg_t <= 0.1 or chunk_idx == 1:
+            prior_condition = "Initial Setup"
+        elif schedule:
+            step = get_step_at_time(max(avg_t - 0.5, 0), schedule)
+            if isinstance(step, dict) and "we_volt" in step:
+                volt_val = step["we_volt"]
+                prior_condition = f"{volt_val} V" if isinstance(volt_val, (int, float)) else str(volt_val)
+            else:
+                prior_condition = "N/A"
+        else:
+            prior_condition = "Initial Setup"
 
         summary_rows.append({
             "Chunk ID": chunk_idx,
@@ -299,19 +523,27 @@ def calc_cap_from_sweep_rate_slope(cv_segments, eval_potential=0.0, bias_schedul
     return pd.DataFrame(summary_rows), fit_details_list
 
 
-
-
-
-
-
 # ==============================================================================
 # EIS ANALYSIS FUNCTIONS
 # ==============================================================================
-def reaction_EIS_parser(df, max_freq=2000000.0):
-    'SEGMENTS RAW EIS CONTINUOUS DTAFRAME INTO DISCRETE EIS RUN IDs'
+def reaction_EIS_parser(df, max_freq=1000000.0):
+    """
+    Segments raw EIS continuous dataframe into discrete EIS Run IDs.
+    Supports Step_Index, Step_Name, frequency sweep resets, and elapsed time jumps.
+    """
     df_parsed = df.copy()
-    df_parsed["is_new_run"] = (df_parsed["Frequency (Hz)"] == max_freq).fillna(True)
-    df_parsed["EIS_Run_ID"] = df_parsed["is_new_run"].cumsum()
+    if "Step_Index" in df_parsed.columns and df_parsed["Step_Index"].nunique() > 1:
+        df_parsed["EIS_Run_ID"] = (df_parsed["Step_Index"] != df_parsed["Step_Index"].shift()).cumsum()
+    elif "Step_Name" in df_parsed.columns and df_parsed["Step_Name"].nunique() > 1:
+        df_parsed["EIS_Run_ID"] = (df_parsed["Step_Name"] != df_parsed["Step_Name"].shift()).cumsum()
+    else:
+        freq_col = "Frequency (Hz)" if "Frequency (Hz)" in df_parsed.columns else df_parsed.columns[0]
+        freqs = pd.to_numeric(df_parsed[freq_col], errors="coerce").fillna(0)
+        is_new = (freqs.diff() > 0) | (freqs == freqs.max())
+        if "Elapsed Time (s)" in df_parsed.columns:
+            dt = pd.to_numeric(df_parsed["Elapsed Time (s)"], errors="coerce").diff()
+            is_new = is_new | (dt > 10.0)
+        df_parsed["EIS_Run_ID"] = is_new.fillna(True).cumsum()
     return df_parsed
 
 def _fit_and_plot_eis(f, Z, title_name):
@@ -358,17 +590,26 @@ def _fit_and_plot_eis(f, Z, title_name):
 
     return circuit, (fig, axes), fitted_params
 
-def EIS_cap_rxn(df, title_name, bias_schedule=None):
-    'PROCESSES FITS, AND PLOTS MULTI-RUN REACTION EIS MEASUREMENTS'
+def EIS_cap_rxn(df, title_name, rxn_schedule=None, bias_schedule=None):
+    """
+    Processes, fits, and plots multi-run in-situ reaction EIS measurements.
+    Returns:
+        dict: {run_id: (circuit, fig, params)}
+        DataFrame: summary table of R0, R1, CPE1, DC Bias, and Time
+    """
+    schedule = rxn_schedule or bias_schedule
+    if df is None or df.empty:
+        return {}, pd.DataFrame()
+
     if "EIS_Run_ID" not in df.columns:
         df = reaction_EIS_parser(df)
 
-    working_df = df.dropna(subset=["Frequency (Hz)","|Z| (Ohms)", "Phase (deg)"]).copy()
+    working_df = df.dropna(subset=["Frequency (Hz)", "|Z| (Ohms)", "Phase (deg)"]).copy()
     working_df["Z' (Ohms)"] = working_df["|Z| (Ohms)"] * np.cos(np.radians(working_df["Phase (deg)"]))  
     working_df['-Z" (Ohms)'] = -working_df["|Z| (Ohms)"] * np.sin(np.radians(working_df["Phase (deg)"]))
 
-    sum_rows  = []
-    last_circuit, last_fig_axes, last_params = None, None, None
+    sum_rows = []
+    run_results = {}
 
     for run_id, chunk in working_df.groupby('EIS_Run_ID', sort=False):
         f = chunk['Frequency (Hz)'].values
@@ -379,43 +620,42 @@ def EIS_cap_rxn(df, title_name, bias_schedule=None):
             continue
 
         f_clean, Z_clean = f[valid_mask], complex_array[valid_mask]
-        circuit, fig_axes, params = _fit_and_plot_eis(f_clean, Z_clean, f"{title_name} Run {run_id}")
+        step_lbl = chunk['Step_Name'].iloc[0] if 'Step_Name' in chunk.columns else f"{title_name} Run {run_id}"
+        circuit, fig_axes, params = _fit_and_plot_eis(f_clean, Z_clean, step_lbl)
 
-        if last_fig_axes is not None:
-            plt.close(last_fig_axes[0])
+        run_results[run_id] = (circuit, fig_axes[0], params)
 
-        last_circuit, last_fig_axes, last_params = circuit, fig_axes, params
-
-        raw_t = chunk['Elapsed Time (s)'].iloc[0] / 3600
-        dc_WE = df['DC Working Electrode (V)'].iloc[0] if 'DC Working Electrode (V)' in chunk.columns else np.nan
+        raw_t = chunk['Elapsed Time (s)'].iloc[0] / 3600.0 if 'Elapsed Time (s)' in chunk.columns else 0.0
+        dc_WE = chunk['DC Working Electrode (V)'].iloc[0] if 'DC Working Electrode (V)' in chunk.columns else np.nan
         
-        prior_condition = None
-        if bias_schedule:
-            cum_time = 0
-            for entry in bias_schedule:
-                start, end = cum_time, cum_time + entry["duration_hours"]
-                if start <= raw_t <= (end + 0.2):
-                    prior_condition = "Initial Setup" if (start == 0 and raw_t < 0.1) else entry["voltage"]
-                    break
-                cum_time = end
-            if prior_condition is None:
-                prior_condition = "Initial Setup" if raw_t < 0.1 else bias_schedule[-1]["voltage"]
+        if raw_t < 0.1:
+            prior_condition = "Initial Setup"
+        elif schedule:
+            step = get_step_at_time(max(raw_t - 0.2, 0), schedule)
+            if isinstance(step, dict) and "we_volt" in step:
+                volt_val = step["we_volt"]
+                prior_condition = f"{volt_val} V" if isinstance(volt_val, (int, float)) else str(volt_val)
+            else:
+                prior_condition = "N/A"
+        else:
+            prior_condition = "Initial Setup"
 
-        r0_val = getattr(circuit, 'parameters_', [np.nan]*3)[0]
-        r1_val = getattr(circuit, 'parameters_', [np.nan]*3)[1]
-        cpe1_0__val = getattr(circuit, 'parameters_', [np.nan]*3)[2]
+        r0_val = getattr(circuit, 'parameters_', [np.nan]*4)[0]
+        r1_val = getattr(circuit, 'parameters_', [np.nan]*4)[1]
+        cpe1_0__val = getattr(circuit, 'parameters_', [np.nan]*4)[2]
 
         sum_rows.append({
             "EIS Run": run_id,
+            "Step Name": step_lbl,
             "Preceding Condition": prior_condition,
             "r0_value": float(r0_val),
             "r1_value": float(r1_val),
             "cpe1_0": float(cpe1_0__val) * 1e6,
-            "Time (hr)": round(raw_t, 1),
-            "DC Working Electrode (V)": f"{dc_WE:.1f}" if pd.notna(dc_WE) else "N/A"
+            "Time (hr)": round(raw_t, 2),
+            "DC Working Electrode (V)": f"{dc_WE:.2f}" if pd.notna(dc_WE) else "N/A"
         })
 
-    return last_circuit, last_fig_axes, last_params, pd.DataFrame(sum_rows)
+    return run_results, pd.DataFrame(sum_rows)
 
 def EIS_cap_pre(df, title_name):
     'PROCESSES A SINGLE EIS SWEEP DATAFRAME AND RETURNS FIT METRICS'
@@ -444,8 +684,11 @@ def EIS_cap_pre(df, title_name):
 # CHARGE TRANSFER ANALYSIS
 # ---------------------------------------------------
 
-def charge_transfer(df_electronics, ss_fraction = 0.25):
-    'Integrates transient charge behavior across constant potential'
+def charge_transfer(df_electronics, rxn_schedule=None, ss_fraction=0.25):
+    'Integrates transient charge behavior across constant potential steps'
+    if df_electronics is None or df_electronics.empty:
+        return pd.DataFrame()
+
     df = df_electronics.copy()
 
     if 'Current (A)' not in df.columns:
@@ -454,44 +697,97 @@ def charge_transfer(df_electronics, ss_fraction = 0.25):
         else:
             raise KeyError("DataFrame must contain 'Current (A)' or 'Current (uA)'.")
     
-    v_col = ('Working Electrode (V)' if 'Working Electrode (V)' in df.columns else 'DC Working Electrode (V)')
-    potential_rounded = df[v_col].round(2)
-    step_change = (df['Step name'] != df['Step name'].shift()) | (potential_rounded != potential_rounded.shift())
-    df['window_id'] = step_change.cumsum()
+    if 'Time (hr)' not in df.columns and 'Elapsed Time (s)' in df.columns:
+        df['Time (hr)'] = df['Elapsed Time (s)'] / 3600.0
+
+    v_col = ('Working Electrode (V)' if 'Working Electrode (V)' in df.columns else 'DC Working Electrode (V)') if ('Working Electrode (V)' in df.columns or 'DC Working Electrode (V)' in df.columns) else None
 
     summary_rows = []
 
-    for window_id, group in df.groupby('window_id'):
-        if len(group) < 4:
-            continue
-        group = group.sort_values('Elapsed Time (s)')
+    # If rxn_schedule is provided, use scheduled step hard boundaries
+    if rxn_schedule:
+        for phase in rxn_schedule:
+            if not isinstance(phase, dict) or "time_window" not in phase:
+                continue
+            start_t, end_t = phase["time_window"]
+            group = df[(df['Time (hr)'] >= start_t) & (df['Time (hr)'] <= end_t)]
+            
+            # Filter for Constant Potential steps if column exists
+            if 'Step name' in group.columns:
+                cp_group = group[group['Step name'] == 'Constant Potential']
+                if not cp_group.empty:
+                    group = cp_group
 
-        time_sec = group['Elapsed Time (s)'].values
-        current_amp = group['Current (A)'].values
+            if len(group) < 4:
+                continue
+            group = group.sort_values('Elapsed Time (s)' if 'Elapsed Time (s)' in group.columns else 'Time (hr)')
 
-        tail_start_idx = int(len(current_amp) * (1.0 - ss_fraction))
-        i_ss_amp = np.mean(current_amp[tail_start_idx:])
-        transient_current_amp = current_amp - i_ss_amp
+            time_sec = group['Elapsed Time (s)'].values if 'Elapsed Time (s)' in group.columns else group['Time (hr)'].values * 3600.0
+            current_amp = group['Current (A)'].values
 
-        raw_charge_C = simpson(y=current_amp, x=time_sec)
-        transient_charge_C = simpson(y=transient_current_amp, x=time_sec)
-        
-        start_time_hr = group['Time (hr)'].iloc[0] if 'Time (hr)' in group.columns else time_sec[0] / 3600.0
-        end_time_hr = group['Time (hr)'].iloc[-1] if 'Time (hr)' in group.columns else time_sec[-1] / 3600.0
+            tail_start_idx = int(len(current_amp) * (1.0 - ss_fraction))
+            i_ss_amp = np.mean(current_amp[tail_start_idx:])
+            transient_current_amp = current_amp - i_ss_amp
 
-        summary_rows.append({
-            "Window ID": window_id,
-            "Step Name": group['Step name'].iloc[0],
-            "Applied Voltage (V)": round(group[v_col].mean(), 2),
-            "Start Time (hr)": round(start_time_hr, 2),
-            "End Time (hr)": round(end_time_hr, 2),
-            "Duration (hr)": round(end_time_hr - start_time_hr, 2),
-            "Baseline Current (uA)": i_ss_amp * 1e6,
-            "Transient Charge (mC)": transient_charge_C * 1e3,
-            "Abs Transient Charge (mC)": abs(transient_charge_C) * 1e3,
-            "Total Charge (mC)": raw_charge_C * 1e3,
-            "Avg Current (uA)": group['Current (uA)'].mean() if 'Current (uA)' in group.columns else (current_amp.mean() * 1e6)
-        })
+            raw_charge_C = simpson(y=current_amp, x=time_sec)
+            transient_charge_C = simpson(y=transient_current_amp, x=time_sec)
+            
+            step_name = group['Step name'].iloc[0] if 'Step name' in group.columns else "Constant Potential"
+            appl_v = phase.get("we_volt", group[v_col].mean() if v_col else 0.0)
+
+            summary_rows.append({
+                "Window ID": phase.get("run", len(summary_rows) + 1),
+                "Step Name": step_name,
+                "Applied Voltage (V)": round(appl_v, 2) if isinstance(appl_v, (int, float)) else appl_v,
+                "Start Time (hr)": round(start_t, 2),
+                "End Time (hr)": round(end_t, 2),
+                "Duration (hr)": round(end_t - start_t, 2),
+                "Baseline Current (uA)": i_ss_amp * 1e6,
+                "Transient Charge (mC)": transient_charge_C * 1e3,
+                "Abs Transient Charge (mC)": abs(transient_charge_C) * 1e3,
+                "Total Charge (mC)": raw_charge_C * 1e3,
+                "Avg Current (uA)": group['Current (uA)'].mean() if 'Current (uA)' in group.columns else (current_amp.mean() * 1e6)
+            })
+
+    else:
+        # Fallback grouping by potential step change
+        potential_rounded = df[v_col].round(2) if v_col else pd.Series(0, index=df.index)
+        step_change = (df['Step name'] != df['Step name'].shift()) if 'Step name' in df.columns else (potential_rounded != potential_rounded.shift())
+        if v_col:
+            step_change = step_change | (potential_rounded != potential_rounded.shift())
+        df['window_id'] = step_change.cumsum()
+
+        for window_id, group in df.groupby('window_id'):
+            if len(group) < 4:
+                continue
+            group = group.sort_values('Elapsed Time (s)' if 'Elapsed Time (s)' in group.columns else 'Time (hr)')
+
+            time_sec = group['Elapsed Time (s)'].values if 'Elapsed Time (s)' in group.columns else group['Time (hr)'].values * 3600.0
+            current_amp = group['Current (A)'].values
+
+            tail_start_idx = int(len(current_amp) * (1.0 - ss_fraction))
+            i_ss_amp = np.mean(current_amp[tail_start_idx:])
+            transient_current_amp = current_amp - i_ss_amp
+
+            raw_charge_C = simpson(y=current_amp, x=time_sec)
+            transient_charge_C = simpson(y=transient_current_amp, x=time_sec)
+            
+            start_time_hr = group['Time (hr)'].iloc[0] if 'Time (hr)' in group.columns else time_sec[0] / 3600.0
+            end_time_hr = group['Time (hr)'].iloc[-1] if 'Time (hr)' in group.columns else time_sec[-1] / 3600.0
+
+            summary_rows.append({
+                "Window ID": window_id,
+                "Step Name": group['Step name'].iloc[0] if 'Step name' in group.columns else "Constant Potential",
+                "Applied Voltage (V)": round(group[v_col].mean(), 2) if v_col else 0.0,
+                "Start Time (hr)": round(start_time_hr, 2),
+                "End Time (hr)": round(end_time_hr, 2),
+                "Duration (hr)": round(end_time_hr - start_time_hr, 2),
+                "Baseline Current (uA)": i_ss_amp * 1e6,
+                "Transient Charge (mC)": transient_charge_C * 1e3,
+                "Abs Transient Charge (mC)": abs(transient_charge_C) * 1e3,
+                "Total Charge (mC)": raw_charge_C * 1e3,
+                "Avg Current (uA)": group['Current (uA)'].mean() if 'Current (uA)' in group.columns else (current_amp.mean() * 1e6)
+            })
 
     return pd.DataFrame(summary_rows)
 
@@ -528,8 +824,10 @@ def calc_stats(values):
     except Exception:
         return avg, 0.0
 
-def getcstats(df_raw=None, file_path=None, data_dir=None, save_to_data_dir=True):
+def getcstats(df_raw=None, file_path=None, data_dir=None, save_to_data_dir=True, rxn_schedule=None):
     'Loads CSV and extracts/calculates general reaction electronics metadata'
+    std_cols = ['Time (hr)', 'Current (uA)', 'Current (A)', 'Working Electrode (V)', 'current/2 (nmol/min)', 'Bias (V)', 'Step_Index']
+    
     source_path = Path(file_path) if file_path else None
 
     if df_raw is None:
@@ -538,14 +836,17 @@ def getcstats(df_raw=None, file_path=None, data_dir=None, save_to_data_dir=True)
         elif data_dir:
             data_dir = Path(data_dir)
             if not data_dir.exists():
-                raise FileNotFoundError(f"data_dir does not exist: {data_dir}")
+                return pd.DataFrame(columns=std_cols)
             csv_files = sorted(data_dir.glob('*.csv'), key=lambda p: p.stat().st_mtime, reverse=True)
             if not csv_files:
-                raise FileNotFoundError(f"No CSV files found in {data_dir}")
+                return pd.DataFrame(columns=std_cols)
             source_path = csv_files[0]
             df_raw = pd.read_csv(source_path)
         else:
-            raise ValueError('Provide df_raw or file_path or data_dir')
+            return pd.DataFrame(columns=std_cols)
+
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame(columns=std_cols)
 
     if save_to_data_dir and source_path and data_dir:
         data_dir = Path(data_dir)
@@ -560,17 +861,65 @@ def getcstats(df_raw=None, file_path=None, data_dir=None, save_to_data_dir=True)
     df_master = df_raw.copy()
     df_master.columns = df_master.columns.str.strip()
 
-    expected_cols = ['Step name', 'Elapsed Time (s)', 'Working Electrode (V)', 'Current (A)', 'Counter Electrode (V)']
-    if not all(col in df_master.columns for col in expected_cols):
-        raise ValueError('Error: CSV file columns do not match expected layout.')
-    
-    df_master['Time (hr)'] = df_master['Elapsed Time (s)'] / 3600.0
-    df_master['Current (uA)'] = df_master['Current (A)'] * 1e6
+    # Normalize column names for both legacy and new schemas
+    if "Step name" not in df_master.columns:
+        if "Step_Name" in df_master.columns:
+            df_master["Step name"] = df_master["Step_Name"]
+        elif "Element_Type" in df_master.columns:
+            df_master["Step name"] = df_master["Element_Type"]
+        else:
+            df_master["Step name"] = "Constant Potential"
 
-    target_steps = ['Constant Potential', 'Open Circuit Potential']
-    df_electronics = df_master[df_master['Step name'].isin(target_steps)].copy()
+    elem_type = df_master["Element_Type"] if "Element_Type" in df_master.columns else df_master["Step name"]
+
+    t_col = "Elapsed Time (s)" if "Elapsed Time (s)" in df_master.columns else ("Elapsed_Time_s" if "Elapsed_Time_s" in df_master.columns else df_master.columns[0])
+    
+    # Calculate continuous monotonically increasing time across elements
+    t_vals = pd.to_numeric(df_master[t_col], errors='coerce').fillna(0).values
+    if len(t_vals) > 1:
+        cum_t = np.zeros(len(t_vals), dtype=float)
+        offset = 0.0
+        cum_t[0] = t_vals[0]
+        
+        step_changed = np.zeros(len(t_vals), dtype=bool)
+        if "Step_Name" in df_master.columns:
+            step_changed = (df_master["Step_Name"] != df_master["Step_Name"].shift(1)).values
+            step_changed[0] = False
+        elif "Element_Type" in df_master.columns:
+            step_changed = (df_master["Element_Type"] != df_master["Element_Type"].shift(1)).values
+            step_changed[0] = False
+
+        for i in range(1, len(t_vals)):
+            if (t_vals[i] < t_vals[i-1] - 0.5) or (step_changed[i] and t_vals[i] < 2.0 and t_vals[i-1] > 1.0):
+                offset += t_vals[i-1]
+            cum_t[i] = t_vals[i] + offset
+            
+        df_master['Time (hr)'] = cum_t / 3600.0
+    else:
+        df_master['Time (hr)'] = t_vals / 3600.0
+
+    i_col = "Current (A)" if "Current (A)" in df_master.columns else ("Current" if "Current" in df_master.columns else df_master.columns[3])
+    df_master['Current (uA)'] = pd.to_numeric(df_master[i_col], errors='coerce') * 1e6
+    df_master['Current (A)'] = pd.to_numeric(df_master[i_col], errors='coerce')
+
+    v_col = "Working Electrode (V)" if "Working Electrode (V)" in df_master.columns else ("Working_Electrode_V" if "Working_Electrode_V" in df_master.columns else df_master.columns[2])
+    df_master['Working Electrode (V)'] = pd.to_numeric(df_master[v_col], errors='coerce')
+
+    # Identify Constant Potential and Open Circuit steps
+    is_target = (
+        elem_type.astype(str).str.contains("Constant Potential|Open Circuit", case=False, na=False) |
+        df_master["Step name"].astype(str).str.contains("Constant Potential|Open Circuit", case=False, na=False)
+    )
+
+    if not is_target.any():
+        df_electronics = df_master.copy()
+    else:
+        df_electronics = df_master[is_target].copy()
 
     df_electronics["current/2 (nmol/min)"] = (abs(df_electronics['Current (uA)']) * 1e-6 / 96485 * 60 / 2 * 1e9)
+
+    if rxn_schedule:
+        df_electronics = assign_voltage_windows(df_electronics, rxn_schedule)
 
     return df_electronics
 
@@ -600,8 +949,18 @@ def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc
     """
     FARADAY = 96485.0  # C / mol
     
+    if rates_df is None or rates_df.empty:
+        return pd.DataFrame()
+
     df_result = rates_df.copy()
     
+    if df_electronics is None or df_electronics.empty:
+        df_result['Avg Current (mA)'] = 0.0
+        df_result['FE_CO2 (%)'] = 0.0
+        df_result['FE_H2 (%)'] = 0.0
+        df_result['FE_Total (%)'] = 0.0
+        return df_result
+
     co2_fe_list, h2_fe_list, total_fe_list, avg_current_mA_list = [], [], [], []
 
     for _, row in df_result.iterrows():
@@ -612,12 +971,15 @@ def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc
         
         # 2. Extract corresponding current points from electronics data
         mask = (df_electronics['Time (hr)'] >= t_start) & (df_electronics['Time (hr)'] <= t_gc)
-        matching_currents = df_electronics.loc[mask, 'Current (A)'].abs()
+        matching_currents = df_electronics.loc[mask, 'Current (A)'].abs() if 'Current (A)' in df_electronics.columns else pd.Series(dtype=float)
         
         # Fallback to the nearest electrochemical point if GC window is sparse
         if matching_currents.empty:
-            nearest_idx = (df_electronics['Time (hr)'] - t_gc).abs().idxmin()
-            mean_current_A = abs(df_electronics.loc[nearest_idx, 'Current (A)'])
+            if 'Time (hr)' in df_electronics.columns and 'Current (A)' in df_electronics.columns and not df_electronics['Current (A)'].dropna().empty:
+                nearest_idx = (df_electronics['Time (hr)'] - t_gc).abs().idxmin()
+                mean_current_A = abs(df_electronics.loc[nearest_idx, 'Current (A)'])
+            else:
+                mean_current_A = 0.0
         else:
             mean_current_A = matching_currents.mean()
 
@@ -650,72 +1012,3 @@ def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc
     df_result['FE_Total (%)'] = total_fe_list
 
     return df_result
-
-def correlate_rates_and_capacitance_by_schedule(summary_rates_df, cv_capacitance_df, bias_schedule_df):
-    """
-    Safely correlates window average rates with CV capacitances using bias_schedule.
-    Includes fallback matching to ensure data is never lost due to column naming or time-units.
-    """
-    if summary_rates_df is None or summary_rates_df.empty:
-        print("[Warning] summary_rates_df is empty.")
-        return pd.DataFrame()
-    if cv_capacitance_df is None or cv_capacitance_df.empty:
-        print("[Warning] cv_capacitance_df is empty.")
-        return pd.DataFrame()
-
-    # Identify time column in CV data dynamically
-    time_col = next((c for c in cv_capacitance_df.columns if 'time' in c.lower() or 'hr' in c.lower()), cv_capacitance_df.columns[0])
-    cap_col = next((c for c in cv_capacitance_df.columns if 'cap' in c.lower()), cv_capacitance_df.columns[1])
-
-    correlated_rows = []
-
-    # Loop through each row of the summary rates (which already correspond to windows)
-    for idx, rate_row in summary_rates_df.iterrows():
-        win_num = rate_row.get('Window', idx + 1)
-        
-        # Try to pull timing from rate_row or bias_schedule_df
-        t_start = rate_row.get('Start (hr)', None)
-        t_end = rate_row.get('End (hr)', None)
-        
-        if (t_start is None or pd.isna(t_start)) and bias_schedule_df is not None and not bias_schedule_df.empty:
-            if idx < len(bias_schedule_df):
-                sched_row = bias_schedule_df.iloc[idx]
-                t_start = sched_row.get('Start (hr)', sched_row.get('start_time', None))
-                t_end = sched_row.get('End (hr)', sched_row.get('end_time', None))
-
-        # Filter CV capacitances within the window range
-        if t_start is not None and t_end is not None:
-            cap_matches = cv_capacitance_df[
-                (cv_capacitance_df[time_col] >= t_start) & 
-                (cv_capacitance_df[time_col] <= t_end)
-            ]
-        else:
-            cap_matches = pd.DataFrame()
-
-        # Fallback: If timing matching finds nothing, chunk the CV dataframe sequentially
-        if cap_matches.empty:
-            num_windows = len(summary_rates_df)
-            chunk_size = max(1, len(cv_capacitance_df) // num_windows)
-            start_i = int(idx * chunk_size)
-            end_i = int((idx + 1) * chunk_size) if idx < num_windows - 1 else len(cv_capacitance_df)
-            cap_matches = cv_capacitance_df.iloc[start_i:end_i]
-
-        # Append individual rows for each capacitance point found in this window
-        for cap_idx, (_, cap_row) in enumerate(cap_matches.iterrows(), start=1):
-            correlated_rows.append({
-                "Window": int(win_num),
-                "CV_Measurement": cap_idx,
-                "Voltage (V)": rate_row.get("Voltage (V)", rate_row.get("Bias (V)", 0.0)),
-                "Capacitance (uF)": cap_row[cap_col],
-                "CO2_mean": rate_row.get("CO2_mean", 0.0),
-                "CO2_err": rate_row.get("CO2_err", 0.0),
-                "H2_mean": rate_row.get("H2_mean", 0.0),
-                "H2_err": rate_row.get("H2_err", 0.0),
-                "CO_mean": rate_row.get("CO_mean", 0.0),
-                "CO_err": rate_row.get("CO_err", 0.0),
-            })
-
-    result_df = pd.DataFrame(correlated_rows)
-    print(f"[Success] Matched {len(result_df)} total CV capacitance points across {len(summary_rates_df)} windows.")
-    return result_df
-

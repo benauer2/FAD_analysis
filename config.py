@@ -34,13 +34,20 @@ def parse_voltage(val):
 
 
 
+import os
 from pathlib import Path
 import pandas as pd
 import numpy as np
 
 def load_schedule_from_csv(csv_path: Path) -> list:
     """Parses sequence CSVs (sequence_default, arrhenius_sequence, etc.) into a standardized schedule dictionary format."""
-    df = pd.read_csv(csv_path)
+    p_str = str(Path(csv_path).resolve())
+    if os.name == 'nt' and not p_str.startswith('\\\\?\\'):
+        if p_str.startswith('\\\\'):
+            p_str = '\\\\?\\UNC\\' + p_str.lstrip('\\')
+        else:
+            p_str = '\\\\?\\' + p_str
+    df = pd.read_csv(p_str)
     
     # Strip whitespace and hidden UTF-8 BOM characters from column headers
     df.columns = [str(c).strip().lstrip('\ufeff') for c in df.columns]
@@ -56,7 +63,11 @@ def load_schedule_from_csv(csv_path: Path) -> list:
     temp_col = _find_col(df, ["Rxr_T_C", "Reactor_T_C", "Reactor_T", "Temp_C", "Temperature_C", "Temp"])
     run_col = _find_col(df, ["Run", "Step", "Step_Index", "Step_ID", "Index"])
     n2_col = _find_col(df, ["N2_flow_sccm", "N2_Flow_sccm", "N2_flow", "N2_sccm", "n2_flow"])
+    h2_col = _find_col(df, ["H2_flow_sccm", "H2_Flow_sccm", "H2_flow", "H2_sccm", "h2_flow"])
+    co_col = _find_col(df, ["CO_flow_sccm", "CO_Flow_sccm", "CO_flow", "CO_sccm", "co_flow"])
     fa_col = _find_col(df, ["FA_flow_ul_min", "FA_Flow_ul_min", "FA_flow", "fa_flow"])
+    tot_flow_col = _find_col(df, ["Total_flow_sccm", "Tot_flow_sccm", "Total_flow", "Tot_flow", "Total_Flow", "tot_flow_f", "tot_flow", "Flow_sccm"])
+    fa_pct_col = _find_col(df, ["Percent_FA", "FA_pct", "fa_pct", "Percent (%) FA in vapor stream", "FA_Percent"])
     volt_col = _find_col(df, ["WE_Voltage", "Target_Voltage_V", "Target_Voltage", "Voltage_V", "Voltage", "we_volt", "Bias_V", "Bias"])
     dur_col = _find_col(df, ["Duration_hrs", "Duration_hr", "Duration (hrs)", "Duration", "dur_hrs", "Duration_hours"])
     avg_col = _find_col(df, ["Avg_Window", "avg_window", "Average_Window"])
@@ -94,14 +105,30 @@ def load_schedule_from_csv(csv_path: Path) -> list:
         step_run = int(row.get(run_col, idx)) if run_col and pd.notna(row.get(run_col)) else idx
         rxr_t = float(row.get(temp_col, 0.0)) if temp_col and pd.notna(row.get(temp_col)) else 0.0
         n2_flow = float(row.get(n2_col, 0.0)) if n2_col and pd.notna(row.get(n2_col)) else 0.0
+        h2_flow = float(row.get(h2_col, 0.0)) if h2_col and pd.notna(row.get(h2_col)) else 0.0
+        co_flow = float(row.get(co_col, 0.0)) if co_col and pd.notna(row.get(co_col)) else 0.0
         fa_flow = float(row.get(fa_col, 0.0)) if fa_col and pd.notna(row.get(fa_col)) else 0.0
         we_volt = parse_voltage(row.get(volt_col, 0.0)) if volt_col else 0.0
+
+        fa_vapor_sccm = fa_flow * (1.220 * 8.314 * 293.15 * 1000) / (46.025 * 101325)
+        
+        if tot_flow_col and pd.notna(row.get(tot_flow_col)):
+            tot_flow = float(row.get(tot_flow_col))
+        else:
+            tot_flow = n2_flow + h2_flow + co_flow + fa_vapor_sccm
+
+        fa_pct = (fa_vapor_sccm / tot_flow * 100.0) if tot_flow > 0 else 0.0
 
         step = {
             "run": step_run,
             "rxr_t": rxr_t,
             "n2_flow": n2_flow,
+            "h2_flow": h2_flow,
+            "co_flow": co_flow,
             "fa_flow": fa_flow,
+            "fa_vapor_sccm": fa_vapor_sccm,
+            "tot_flow": tot_flow,
+            "fa_pct": fa_pct,
             "we_volt": we_volt,
             "avg_window": avg_window,
             "dur_hrs": dur_hrs,
@@ -201,6 +228,9 @@ def get_voltage_at_time(time_hours, RXN_SCHEDULE, t_start=0.0):
     if step and isinstance(step, dict) and "we_volt" in step:
         return step["we_volt"]
     return 0.0
+
+get_bias_at_time = get_voltage_at_time
+
 
 
 

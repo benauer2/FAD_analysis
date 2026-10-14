@@ -202,19 +202,39 @@ MFC PLOTTER
 def plot_mfc_profile(mfc_df, figsize=(11, 4)):
     fig, ax = plt.subplots(figsize=figsize)
     
-    time_col = 'Elapsed_Time_hr' if 'Elapsed_Time_hr' in mfc_df.columns else 'Time (hr)'
-    max_time = mfc_df[time_col].max()
+    time_col = 'Elapsed_Time_hr' if 'Elapsed_Time_hr' in mfc_df.columns else ('Time (hr)' if 'Time (hr)' in mfc_df.columns else mfc_df.columns[0])
+    max_time = pd.to_numeric(mfc_df[time_col], errors='coerce').max()
+    if pd.isna(max_time) or max_time <= 0:
+        max_time = 1.0
     
-    # Calculate dynamic x-interval
-    x_interval = max(2.0, np.ceil(max_time / 10))
+    x_interval = max(0.5, np.ceil(max_time / 10.0))
     
-    n2_col = [c for c in mfc_df.columns if 'N2' in c and 'Flow' in c]
-    h2_col = [c for c in mfc_df.columns if 'H2' in c and 'Flow' in c]
+    n2_cols = [c for c in mfc_df.columns if 'n2' in c.lower() and 'flow' in c.lower()]
+    h2_cols = [c for c in mfc_df.columns if 'h2' in c.lower() and 'flow' in c.lower()]
+    co_cols = [c for c in mfc_df.columns if 'co' in c.lower() and 'flow' in c.lower() and 'co2' not in c.lower()]
+    co2_cols = [c for c in mfc_df.columns if 'co2' in c.lower() and 'flow' in c.lower()]
     
-    if n2_col:
-        ax.plot(mfc_df[time_col], mfc_df[n2_col[0]], color='navy', lw=1.5, label=r'N2 Flow (sccm)')
-    if h2_col:
-        ax.plot(mfc_df[time_col], mfc_df[h2_col[0]], color='forestgreen', lw=1.5, label=r'H2 Flow (sccm)')
+    plotted_cols = set()
+    
+    if n2_cols:
+        ax.plot(mfc_df[time_col], pd.to_numeric(mfc_df[n2_cols[0]], errors='coerce'), color='navy', lw=1.5, label=r'N2 Flow (sccm)')
+        plotted_cols.add(n2_cols[0])
+    if h2_cols:
+        ax.plot(mfc_df[time_col], pd.to_numeric(mfc_df[h2_cols[0]], errors='coerce'), color='forestgreen', lw=1.5, label=r'H2 Flow (sccm)')
+        plotted_cols.add(h2_cols[0])
+    if co_cols:
+        ax.plot(mfc_df[time_col], pd.to_numeric(mfc_df[co_cols[0]], errors='coerce'), color='darkorange', lw=1.8, label=r'CO Flow (sccm)')
+        plotted_cols.add(co_cols[0])
+    if co2_cols:
+        ax.plot(mfc_df[time_col], pd.to_numeric(mfc_df[co2_cols[0]], errors='coerce'), color='crimson', lw=1.5, label=r'CO2 Flow (sccm)')
+        plotted_cols.add(co2_cols[0])
+        
+    other_flow_cols = [c for c in mfc_df.columns if 'flow' in c.lower() and 'total' not in c.lower() and c not in plotted_cols]
+    palette = ['purple', 'teal', 'magenta', 'brown', 'goldenrod']
+    for idx, col in enumerate(other_flow_cols):
+        c_color = palette[idx % len(palette)]
+        clean_name = col.replace('_', ' ').replace('(sccm)', '').strip()
+        ax.plot(mfc_df[time_col], pd.to_numeric(mfc_df[col], errors='coerce'), color=c_color, lw=1.5, label=f'{clean_name} (sccm)')
         
     ax.set_xlabel("Time (hr)", labelpad=7, fontsize=14)
     ax.set_ylabel("Flow Rate (sccm)", labelpad=7, fontsize=14)
@@ -227,7 +247,7 @@ def plot_mfc_profile(mfc_df, figsize=(11, 4)):
     for spine in ['top', 'bottom', 'left', 'right']:
         ax.spines[spine].set_linewidth(1.5)
         
-    ax.legend(loc='upper right', frameon=False, fontsize=11)
+    ax.legend(loc='best', frameon=False, fontsize=11)
     return fig, ax
 
 '''

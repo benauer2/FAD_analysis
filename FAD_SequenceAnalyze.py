@@ -2,8 +2,8 @@ from GC_handler.GC_utilities import GCController
 from tkinter import filedialog
 
 JSON_files = []
-JSON_files.append(r"C:\Users\cemshauerlocal\Documents\GitHub\REACTION-REPORT-GENERATOR\GC_handler\FAD_IntegrationParams_FID.json")
-JSON_files.append(r"C:\Users\cemshauerlocal\Documents\GitHub\REACTION-REPORT-GENERATOR\GC_handler\FAD_IntegrationParams_TCD.json")
+JSON_files.append(r"C:\Users\cemshauerlocal\Documents\GitHub\FAD_analysis\GC_handler\FAD_IntegrationParams_FID.json")
+JSON_files.append(r"C:\Users\cemshauerlocal\Documents\GitHub\FAD_analysis\GC_handler\FAD_IntegrationParams_TCD.json")
 
 
 save_folder = filedialog.askdirectory(title="Select a Folder to save the CSV output")
