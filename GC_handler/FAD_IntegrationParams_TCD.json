@@ -15,9 +15,9 @@
             "integration_algorithm": "simple split",
             "_comment_algorithm": "Options: simple peak, simple split, simple skim, exponential skim, flat base",
             "time_stamps": [
-                1.4,
-                2.25,
-                2.7
+                1.25,
+                2.2,
+                3
             ],
             "_comment_time_stamps": "single peaks need two time stamps, simple splits need three, simple skims need four",
             "ignored_chemicals": [

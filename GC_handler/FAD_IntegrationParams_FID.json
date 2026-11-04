@@ -16,7 +16,7 @@
             "_comment_algorithm": "Options: simple peak, simple split, simple skim, exponential skim, exponential skim, flat base",
             "time_stamps": [
                 1.5,
-                2.2,
+                2.1,
                 6
             ],
             "_comment_time_stamps": "simple peaks need two time stamps, simple splits need three, simple skims need four",

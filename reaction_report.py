@@ -190,6 +190,11 @@ pdf.set_font('Times', '', 12)
 pdf.cell(0, 10, f"{TRIAL_INFO.get('Date', 'N/A')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
 pdf.set_font('Times', 'B', 12)
+pdf.cell(pdf.get_string_width("GC Method: ") + 2, 10, "GC Method: ", new_x=XPos.RIGHT, new_y=YPos.LAST)
+pdf.set_font('Times', '', 12)
+pdf.cell(0, 10, f"{TRIAL_INFO.get('GC method', TRIAL_INFO.get('GC Method', TRIAL_INFO.get('gc_method', 'N/A')))}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+pdf.set_font('Times', 'B', 12)
 pdf.cell(pdf.get_string_width("Reactor Temperature: ") + 2, 10, "Reactor Temperature: ", new_x=XPos.RIGHT, new_y=YPos.LAST)
 pdf.set_font('Times', '', 12)
 pdf.cell(0, 10, f"{TRIAL_INFO.get('T reactor (deg C)', 'N/A')} \u00b0C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)

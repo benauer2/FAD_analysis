@@ -42,6 +42,7 @@ def safe_read_csv(file_path, **kwargs):
     """
     return pd.read_csv(get_extended_path(file_path), **kwargs)
 
+
 def select_folder_and_load_data(selected_dir=None):
     # Get the directory from the user if not provided
     if selected_dir is None:
@@ -97,7 +98,7 @@ def select_folder_and_load_data(selected_dir=None):
             elif "eis" in filename_lower and "pre" not in filename_lower:
                 print(f"Processing 'EIS' file: {file.name}")    
                 all_df["EIS_df"] = safe_read_csv(file)
-            elif "raw_data" in filename_lower:
+            elif "raw_squidstat_data" in filename_lower:
                 print(f"Processing 'Electronics' file: {file.name}")
                 all_df["electronics_df"] = safe_read_csv(file)
             elif "temp_data" in filename_lower:
@@ -145,3 +146,42 @@ def select_folder_and_load_data(selected_dir=None):
             pre_reaction_df[folder_name] = merged_df
 
     return all_df, pre_reaction_df, reaction_path
+
+def load_selected_data(selected_dir=None):
+    # Get the directory from the user if not provided
+    if selected_dir is None:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected_dir = filedialog.askdirectory(
+            title="Select Reaction Folder",
+            initialdir=projmon_loc if projmon_loc.exists() else Path.cwd()
+            )
+    # Handle the case where the user cancels the selection
+    if not selected_dir:
+        print("No folder selected.")
+        return None, None, None
+    
+    reaction_path = Path(selected_dir)
+    # Route into the raw_data folder if it exists, otherwise search reaction_path directly
+    if (reaction_path / "raw_data").exists():
+        parent_path = reaction_path / "raw_data"
+    else:
+        parent_path = reaction_path
+
+    all_df = {}
+    pre_reaction_df = {}
+        
+    '''
+    ##########################################
+    PROCESS CSV FILES INSIDE DATA FOLDER
+    ##########################################
+    '''
+    # Search both parent_path and reaction_path root for csv files
+    csv_search_paths = list(parent_path.glob('*.csv'))
+    if parent_path != reaction_path:
+        for f in reaction_path.glob('*.csv'):
+            if f not in csv_search_paths:
+                csv_search_paths.append(f)
+
+    return csv_search_paths

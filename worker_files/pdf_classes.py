@@ -231,6 +231,7 @@ class ReactionReport(BaseReport):
         kv = {
             "Device": self.trial_info.get("Device", "N/A"),
             "Date": self.trial_info.get("Date", "N/A"),
+            "GC Method": self.trial_info.get("GC method", self.trial_info.get("GC Method", self.trial_info.get("gc_method", "N/A"))),
             "Reactor Temperature": f"{self.trial_info.get('T reactor (deg C)', 'N/A')} deg C",
             "% FA in vapor stream": f"{self.trial_info.get('Percent (%) FA in vapor stream', 'N/A')}%",
             "Pre-rxn Capacitance (CV, N2)": f"{pre_rxn_cap:.2f} uF"

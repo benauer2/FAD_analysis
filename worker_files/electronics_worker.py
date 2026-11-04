@@ -926,7 +926,17 @@ def getcstats(df_raw=None, file_path=None, data_dir=None, save_to_data_dir=True,
 # ---------------------------------
 # Faradaic Efficiency Calculation
 # ---------------------------------
-def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc_sampling_window_sec=60):
+def calculate_gc_faradaic_efficiency(
+    rates_df, 
+    df_electronics, 
+    n_electrons=2, 
+    gc_sampling_window_sec=60,
+    baseline_rate=0.0,
+    thermal_baseline=None,
+    baseline_rate_co2=None,
+    baseline_rate_h2=None,
+    min_current_A=1e-7
+):
     """
     Aligns GC reaction rates (from calc_rxn_rates/calc_rxn_rates_dynamic) with
     electrochemical current data to calculate instantaneous Faradaic Efficiency (FE %).
@@ -941,11 +951,27 @@ def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc
         Electrons per product molecule (n=2 for HCOOH -> CO2 + 2H+ + 2e-).
     gc_sampling_window_sec : float
         Time window (seconds) over which the GC sample loop is filled prior to injection.
+    baseline_rate : float, int, dict, or Series, optional
+        Thermal baseline rate(s) (in nmol/min) to subtract from extensive rates.
+        - Scalar (float/int): subtracted from extensive rates.
+        - Dict of species: e.g. {'CO2': 15.0, 'H2': 10.0}.
+        - Dict of temperatures: e.g. {80: 5.0, 100: 15.0, 120: 35.0}.
+        - Nested dict: e.g. {'CO2': {80: 5.0, 100: 15.0}, 'H2': {80: 4.0, 100: 12.0}}.
+    thermal_baseline : float, int, dict, or Series, optional
+        Alias for baseline_rate. If provided, takes precedence over baseline_rate.
+    baseline_rate_co2 : float, optional
+        Explicit thermal baseline rate for CO2 (nmol/min). Overrides baseline_rate for CO2.
+    baseline_rate_h2 : float, optional
+        Explicit thermal baseline rate for H2 (nmol/min). Overrides baseline_rate for H2.
+    min_current_A : float, optional
+        Minimum current threshold in Amperes (default 1e-7 A / 0.1 uA) below which FE is 0%
+        to avoid division by zero/open-circuit noise.
 
     Returns:
     --------
     rates_df_fe : DataFrame
-        Updated rates DataFrame containing FE % columns for CO2, H2, and total FE.
+        Updated rates DataFrame containing FE % columns for CO2, H2, and total FE,
+        as well as baseline and net electrochemical rates.
     """
     FARADAY = 96485.0  # C / mol
     
@@ -954,6 +980,54 @@ def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc
 
     df_result = rates_df.copy()
     
+    # Determine base thermal baseline input
+    eff_baseline = thermal_baseline if thermal_baseline is not None else baseline_rate
+
+    def _get_baseline_val(spec, species_name, row_data):
+        if spec is None:
+            return 0.0
+        if isinstance(spec, (int, float, np.number)):
+            return float(spec)
+        if isinstance(spec, dict):
+            # 1. Check for direct species key
+            for key in [species_name, f"{species_name} (nmol/min)", species_name.lower(), species_name.upper()]:
+                if key in spec:
+                    val = spec[key]
+                    if isinstance(val, (int, float, np.number)):
+                        return float(val)
+                    elif isinstance(val, dict):
+                        # Nested temperature dict e.g. {'CO2': {80: 5.0, 100: 15.0}}
+                        temp_val = row_data.get('Temp_C')
+                        if temp_val is not None:
+                            try:
+                                t_float = float(temp_val)
+                                for tk, tv in val.items():
+                                    if abs(float(tk) - t_float) < 1.0:
+                                        return float(tv)
+                            except (ValueError, TypeError):
+                                pass
+            # 2. Check for temperature-keyed dict e.g. {80: 5.0, 100: 15.0}
+            temp_val = row_data.get('Temp_C')
+            if temp_val is not None:
+                try:
+                    t_float = float(temp_val)
+                    for tk, tv in spec.items():
+                        try:
+                            if abs(float(tk) - t_float) < 1.0:
+                                if isinstance(tv, dict):
+                                    return float(tv.get(species_name, 0.0))
+                                return float(tv)
+                        except (ValueError, TypeError):
+                            pass
+                except (ValueError, TypeError):
+                    pass
+            return 0.0
+        if callable(spec):
+            return float(spec(row_data, species_name))
+        if isinstance(spec, str) and spec in row_data:
+            return float(row_data[spec])
+        return 0.0
+
     if df_electronics is None or df_electronics.empty:
         df_result['Avg Current (mA)'] = 0.0
         df_result['FE_CO2 (%)'] = 0.0
@@ -962,6 +1036,8 @@ def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc
         return df_result
 
     co2_fe_list, h2_fe_list, total_fe_list, avg_current_mA_list = [], [], [], []
+    co2_base_list, h2_base_list = [], []
+    co2_electro_list, h2_electro_list = [], []
 
     for _, row in df_result.iterrows():
         t_gc = row['Time (hr)']
@@ -985,18 +1061,32 @@ def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc
 
         avg_current_mA_list.append(mean_current_A * 1e3)
 
-        # 3. Calculate FE (%) for each species:
-        # Rate (mol/s) = Rate (nmol/min) * 1e-9 / 60
-        # Theoretical Current I_theo = Rate (mol/s) * n * F
-        if mean_current_A > 0:
+        # 3. Determine thermal baseline to subtract from extensive rate
+        co2_base = float(baseline_rate_co2) if baseline_rate_co2 is not None else _get_baseline_val(eff_baseline, 'CO2', row)
+        h2_base = float(baseline_rate_h2) if baseline_rate_h2 is not None else _get_baseline_val(eff_baseline, 'H2', row)
+
+        co2_rate_nmol_min = row.get('CO2 (nmol/min)', 0.0)
+        h2_rate_nmol_min = row.get('H2 (nmol/min)', 0.0)
+
+        # Net electrochemical rate (extensive rate minus thermal baseline)
+        co2_rate_electro = co2_rate_nmol_min - co2_base
+        h2_rate_electro = h2_rate_nmol_min - h2_base
+
+        co2_base_list.append(round(co2_base, 3))
+        h2_base_list.append(round(h2_base, 3))
+        co2_electro_list.append(round(co2_rate_electro, 3))
+        h2_electro_list.append(round(h2_rate_electro, 3))
+
+        # 4. Calculate FE (%) for each species:
+        # Rate (mol/s) = Rate_electro (nmol/min) * 1e-9 / 60
+        # Theoretical Current I_theo = Rate_electro (mol/s) * n * F
+        if mean_current_A > min_current_A:
             # CO2 Faradaic Efficiency
-            co2_rate_nmol_min = row.get('CO2 (nmol/min)', 0.0)
-            co2_i_theo_A = (co2_rate_nmol_min * 1e-9 / 60.0) * n_electrons * FARADAY
+            co2_i_theo_A = (co2_rate_electro * 1e-9 / 60.0) * n_electrons * FARADAY
             co2_fe = (co2_i_theo_A / mean_current_A) * 100.0
             
             # H2 Faradaic Efficiency
-            h2_rate_nmol_min = row.get('H2 (nmol/min)', 0.0)
-            h2_i_theo_A = (h2_rate_nmol_min * 1e-9 / 60.0) * n_electrons * FARADAY
+            h2_i_theo_A = (h2_rate_electro * 1e-9 / 60.0) * n_electrons * FARADAY
             h2_fe = (h2_i_theo_A / mean_current_A) * 100.0
         else:
             co2_fe = 0.0
@@ -1007,8 +1097,13 @@ def calculate_gc_faradaic_efficiency(rates_df, df_electronics, n_electrons=2, gc
         total_fe_list.append(round(co2_fe + h2_fe, 2))
 
     df_result['Avg Current (mA)'] = avg_current_mA_list
+    df_result['CO2_Baseline (nmol/min)'] = co2_base_list
+    df_result['H2_Baseline (nmol/min)'] = h2_base_list
+    df_result['CO2_Electro (nmol/min)'] = co2_electro_list
+    df_result['H2_Electro (nmol/min)'] = h2_electro_list
     df_result['FE_CO2 (%)'] = co2_fe_list
     df_result['FE_H2 (%)'] = h2_fe_list
     df_result['FE_Total (%)'] = total_fe_list
 
     return df_result
+
